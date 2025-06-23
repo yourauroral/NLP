@@ -1,0 +1,4 @@
+TensorFlow  2.9.0
+Python  3.8(ubuntu20.04)
+CUDA  11.2
+RTX3090 * 1
