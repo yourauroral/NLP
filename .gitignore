@@ -18,3 +18,7 @@ env/
 .idea/
 *.swp
 .DS_Store
+
+# Pretrained weights (downloaded via download_weights.py, not versioned)
+model/*.npy
+

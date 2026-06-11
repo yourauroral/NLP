@@ -21,6 +21,25 @@
 
 ## 快速开始
 
+**1. 安装依赖**
+
+```bash
+pip install -r requirements.txt
+```
+
+**2. 下载预训练权重**
+
+权重（约 330 MB）不随仓库分发，需外部下载到 `model/` 目录：
+
+```bash
+python download_weights.py
+```
+
+> 首次使用前，请在 `download_weights.py` 中填好 `BASE_URL`（权重的托管根地址），
+> 或通过环境变量指定：`export SENTIMENT_WEIGHTS_URL=<下载根地址>`。
+
+**3. 提取特征**
+
 将文本转换为 4096 维特征向量：
 
 ```python
@@ -52,13 +71,24 @@ python sst_binary_demo.py
 ├── encoder.py           # mLSTM 模型与特征提取（Model 类）
 ├── utils.py             # 数据加载、预处理、逻辑回归训练等工具函数
 ├── sst_binary_demo.py   # SST 二分类示例 + 情感神经元可视化
-├── model/               # 预训练权重（0.npy ~ 14.npy）
+├── download_weights.py  # 从外部托管地址下载预训练权重
+├── requirements.txt     # Python 依赖
+├── tests/               # 冒烟测试
+├── model/               # 预训练权重（0.npy ~ 14.npy，需下载，不纳入版本控制）
 └── data/                # SST 二分类数据集（train/dev/test_binary_sent.csv）
 ```
 
+## 测试
+
+```bash
+pytest tests/
+```
+
+冒烟测试会加载权重、提取特征，并验证情感神经元能区分正/负文本。若 `model/` 下权重缺失，测试会自动跳过。
+
 ## 预训练模型
 
-本仓库包含一个 **4096 单元的乘性 LSTM（multiplicative LSTM, mLSTM）** 模型的预训练参数，训练数据为 McAuley 等人 (2015) [1] 提出的亚马逊商品评论数据集。该数据集去重后包含 1996 年 5 月至 2014 年 7 月间超过 **8200 万** 条商品评论，对应超过 **380 亿** 训练字节。模型在 **四块 NVIDIA Pascal GPU** 上训练了**一个月**，处理速度约为每秒 12,500 个字符。
+本项目使用一个 **4096 单元的乘性 LSTM（multiplicative LSTM, mLSTM）** 模型的预训练参数（通过 `download_weights.py` 获取），训练数据为 McAuley 等人 (2015) [1] 提出的亚马逊商品评论数据集。该数据集去重后包含 1996 年 5 月至 2014 年 7 月间超过 **8200 万** 条商品评论，对应超过 **380 亿** 训练字节。模型在 **四块 NVIDIA Pascal GPU** 上训练了**一个月**，处理速度约为每秒 12,500 个字符。
 
 ## 参考文献
 

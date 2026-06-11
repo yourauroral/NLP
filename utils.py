@@ -95,7 +95,7 @@ def iter_data(*data, **kwargs):
 
     try:
         n = len(data[0])
-    except:
+    except TypeError:
         n = data[0].shape[0]
 
     batches = n // size
