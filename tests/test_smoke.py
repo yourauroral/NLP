@@ -5,8 +5,8 @@
 或：
     python tests/test_smoke.py
 
-该测试会真正加载 model/ 下的权重并构建计算图，因此需要
-TensorFlow 与全部预训练 .npy 文件就绪。
+该测试会真正加载权重并跑前向，因此需要 PyTorch 与
+model/sentiment.safetensors 就绪（可用 download_weights.py / convert_weights.py 准备）。
 """
 import os
 import sys
@@ -18,12 +18,12 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-MODEL_DIR = os.path.join(ROOT, 'model')
+WEIGHTS = os.path.join(ROOT, 'model', 'sentiment.safetensors')
 
 # 缺少权重文件时跳过，而不是报错失败
 pytestmark = pytest.mark.skipif(
-    not os.path.exists(os.path.join(MODEL_DIR, '0.npy')),
-    reason='预训练权重缺失 (model/0.npy)，跳过冒烟测试',
+    not os.path.exists(WEIGHTS),
+    reason='预训练权重缺失 (model/sentiment.safetensors)，跳过冒烟测试',
 )
 
 
@@ -31,7 +31,7 @@ def test_transform_shape_and_sentiment():
     """transform 输出形状正确，且情感神经元能区分正负文本。"""
     from encoder import Model, SENTIMENT_NEURON
 
-    model = Model(model_dir=MODEL_DIR)
+    model = Model(weights_path=WEIGHTS)
     feats = model.transform(['I love this, it is wonderful!',
                              'I hate this, it is terrible!'])
 
@@ -45,11 +45,11 @@ def test_transform_shape_and_sentiment():
 
 
 def test_two_instances_are_independent():
-    """两次实例化互不干扰（验证全局状态问题已修复）。"""
+    """两次实例化互不干扰，且结果确定可复现。"""
     from encoder import Model
 
-    m1 = Model(model_dir=MODEL_DIR)
-    m2 = Model(model_dir=MODEL_DIR)
+    m1 = Model(weights_path=WEIGHTS)
+    m2 = Model(weights_path=WEIGHTS)
 
     text = ['a neutral sentence about the weather today']
     f1 = m1.transform(text)

@@ -1,6 +1,7 @@
-tensorflow==2.9.0
+# 在 AutoDL (GPU) 上：torch 不锁定具体版本，安装与机器 CUDA 匹配的 wheel 即可
+torch>=2.0
+safetensors
 numpy
 pandas
 scikit-learn
-tqdm
 matplotlib

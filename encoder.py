@@ -1,314 +1,193 @@
+"""情感神经元 mLSTM —— PyTorch 推理实现。
+
+在海量亚马逊评论上无监督训练的字节级乘性 LSTM（4096 单元）。
+其第 2388 维隐单元自发学到了“情感”，可作为强特征用于情感分类。
+
+本文件仅做推理（特征提取），权重为预训练且固定，因此：
+  * 权重归一化在加载时一次性折叠进有效权重；
+  * 前向全程 no_grad。
+
+公开接口（与原 TensorFlow 版保持一致）：
+    model = Model()                      # 自动选择 cuda / cpu
+    feats = model.transform(texts)       # -> np.ndarray [N, 4096]
+"""
 import os
 import time
+
 import numpy as np
-import tensorflow as tf
+import torch
+import torch.nn as nn
+from safetensors.torch import load_file
 
-# TensorFlow 1.x 兼容性设置
-tf.compat.v1.disable_v2_behavior()
-tf.placeholder = tf.compat.v1.placeholder
-tf.Session = tf.compat.v1.Session
-tf.get_variable = tf.compat.v1.get_variable
-tf.variable_scope = tf.compat.v1.variable_scope
-tf.global_variables_initializer = tf.compat.v1.global_variables_initializer
-
-from tqdm import tqdm
-from utils import HParams, preprocess, iter_data
+from utils import preprocess
 
 # 情感神经元所在维度（无监督训练中自发学到的情感单元）
 SENTIMENT_NEURON = 2388
 
+DEFAULT_WEIGHTS = os.path.join('model', 'sentiment.safetensors')
 
-def make_param_loader(params):
-    """构造一个权重加载器闭包：每次被 get_variable 调用时按顺序返回下一个预训练数组。
 
-    用闭包封装计数器（替代原来的模块级全局 nloaded），
-    使每个 Model 实例拥有独立的加载状态，互不干扰。
+class mLSTM(nn.Module):
+    """乘性 LSTM（multiplicative LSTM）—— 用乘性连接增强信息流的 LSTM 变体。
+
+    权重以 buffer 形式保存（推理期固定，不参与训练）。加载时即把权重归一化
+    （tf.nn.l2_normalize(w, axis=0) * g）折叠进 wx/wh/wmx/wmh，前向时直接使用。
     """
-    state = {'n': 0}
 
-    def load_params(shape, dtype, *args, **kwargs):
-        p = params[state['n']]
-        state['n'] += 1
-        return p
+    def __init__(self, weights, nhidden=4096, nembd=64):
+        super().__init__()
+        self.nhidden = nhidden
+        self.nembd = nembd
 
-    return load_params
+        # 字节嵌入 + 输出投影（out_* 仅为完整性保留，特征提取不使用）
+        self.register_buffer('embedding', weights['embedding'])   # (256, 64)
+        self.register_buffer('out_w', weights['out_w'])           # (4096, 256)
+        self.register_buffer('out_b', weights['out_b'])           # (256,)
 
+        # 折叠权重归一化：按列 L2 归一化后乘以增益 g
+        self.register_buffer('wx',  self._wn(weights['wx'],  weights['gx']))   # (64, 16384)
+        self.register_buffer('wh',  self._wn(weights['wh'],  weights['gh']))   # (4096, 16384)
+        self.register_buffer('wmx', self._wn(weights['wmx'], weights['gmx']))  # (64, 4096)
+        self.register_buffer('wmh', self._wn(weights['wmh'], weights['gmh']))  # (4096, 4096)
+        self.register_buffer('b',   weights['b'])                              # (16384,)
 
-def embd(X, ndim, nvocab, init, scope='embedding'):
-    """词嵌入层 - 将词索引转换为稠密向量"""
-    with tf.variable_scope(scope):
-        embd = tf.get_variable("w", [nvocab, ndim], initializer=init)
-        h = tf.nn.embedding_lookup(embd, X)
-        return h
+    @staticmethod
+    def _wn(w, g):
+        """对应 tf.nn.l2_normalize(w, axis=0) * g。"""
+        return w / w.norm(dim=0, keepdim=True) * g
 
+    @torch.no_grad()
+    def forward(self, X, mask):
+        """逐时间步前向。
 
-def fc(x, nout, act, init, wn=False, bias=True, scope='fc'):
-    """全连接层 - 线性变换 + 激活函数"""
-    with tf.variable_scope(scope):
-        nin = x.get_shape()[-1].value
-        w = tf.get_variable("w", [nin, nout], initializer=init)
+        Args:
+            X:    (N, T) 字节 id（0~255）
+            mask: (N, T, 1) 浮点掩码，1=真实 token，0=填充位
+        Returns:
+            cells: (N, T, nhidden) 每个时间步的细胞状态
+            c:     (N, nhidden) 最终细胞状态（即特征向量）
+            h:     (N, nhidden) 最终隐藏状态
+        """
+        N, T = X.shape
+        words = self.embedding[X]                       # (N, T, nembd)
+        c = X.new_zeros(N, self.nhidden, dtype=torch.float32)
+        h = X.new_zeros(N, self.nhidden, dtype=torch.float32)
 
-        if wn:  # 权重归一化
-            g = tf.get_variable("g", [nout], initializer=init)
-            w = tf.nn.l2_normalize(w, axis=0) * g
+        cells = []
+        for t in range(T):
+            x = words[:, t, :]                          # (N, nembd)
 
-        z = tf.matmul(x, w)
+            # 乘性连接：输入与隐状态的逐元素乘积
+            m = (x @ self.wmx) * (h @ self.wmh)         # (N, nhidden)
+            # 四个门的线性部分
+            z = (x @ self.wx) + (m @ self.wh) + self.b  # (N, 4*nhidden)
 
-        if bias:
-            b = tf.get_variable("b", [nout], initializer=init)
-            z = z + b
+            i, f, o, u = torch.split(z, self.nhidden, dim=1)
+            i = torch.sigmoid(i)    # 输入门
+            f = torch.sigmoid(f)    # 遗忘门
+            o = torch.sigmoid(o)    # 输出门
+            u = torch.tanh(u)       # 候选值
 
-        h = act(z)
-        return h
-
-
-def mlstm(inputs, c, h, M, ndim, init, scope='lstm', wn=False):
-    """乘性LSTM - 使用乘性连接增强信息流的LSTM变体"""
-    nin = inputs[0].get_shape()[1].value
-
-    with tf.variable_scope(scope):
-        # 标准LSTM权重
-        wx = tf.get_variable("wx", [nin, ndim * 4], initializer=init)
-        wh = tf.get_variable("wh", [ndim, ndim * 4], initializer=init)
-
-        # 乘性LSTM的关键创新 - 乘性权重
-        wmx = tf.get_variable("wmx", [nin, ndim], initializer=init)
-        wmh = tf.get_variable("wmh", [ndim, ndim], initializer=init)
-
-        b = tf.get_variable("b", [ndim * 4], initializer=init)
-
-        # 权重归一化参数
-        if wn:
-            gx = tf.get_variable("gx", [ndim * 4], initializer=init)
-            gh = tf.get_variable("gh", [ndim * 4], initializer=init)
-            gmx = tf.get_variable("gmx", [ndim], initializer=init)
-            gmh = tf.get_variable("gmh", [ndim], initializer=init)
-
-    # 应用权重归一化
-    if wn:
-        wx = tf.nn.l2_normalize(wx, axis=0) * gx
-        wh = tf.nn.l2_normalize(wh, axis=0) * gh
-        wmx = tf.nn.l2_normalize(wmx, axis=0) * gmx
-        wmh = tf.nn.l2_normalize(wmh, axis=0) * gmh
-
-    cs = []
-
-    # 按时间步处理序列
-    for idx, x in enumerate(inputs):
-        # 乘性LSTM核心：输入和隐藏状态的元素级乘法
-        m = tf.matmul(x, wmx) * tf.matmul(h, wmh)
-
-        # 门控计算
-        z = tf.matmul(x, wx) + tf.matmul(m, wh) + b
-
-        # 分离四个门
-        i, f, o, u = tf.split(z, 4, 1)
-        i = tf.nn.sigmoid(i)  # 输入门
-        f = tf.nn.sigmoid(f)  # 遗忘门
-        o = tf.nn.sigmoid(o)  # 输出门
-        u = tf.tanh(u)        # 候选值
-
-        if M is not None:  # 处理变长序列的掩码
             ct = f * c + i * u
-            ht = o * tf.tanh(ct)
-            m = M[:, idx, :]
-            c = ct * m + c * (1 - m)
-            h = ht * m + h * (1 - m)
-        else:
-            c = f * c + i * u
-            h = o * tf.tanh(c)
+            ht = o * torch.tanh(ct)
 
-        inputs[idx] = h
-        cs.append(c)
+            # 填充位保持旧状态（mask=0 时不更新），故最终状态对应最后一个真实 token
+            mm = mask[:, t, :]                          # (N, 1)
+            c = ct * mm + c * (1 - mm)
+            h = ht * mm + h * (1 - mm)
+            cells.append(c)
 
-    cs = tf.stack(cs)
-    return inputs, cs, c, h
-
-
-def model(X, S, M, hps, init):
-    """主模型：词嵌入 + mLSTM + 输出层"""
-    nsteps = X.get_shape()[1]
-    cstart, hstart = tf.unstack(S, num=hps.nstates)
-
-    with tf.variable_scope('model'):
-        words = embd(X, hps.nembd, hps.nvocab, init)
-        inputs = tf.unstack(words, nsteps, 1)
-
-        # mLSTM处理 - 产生4096维特征表示
-        hs, cells, cfinal, hfinal = mlstm(
-            inputs, cstart, hstart, M, hps.nhidden, init, scope='rnn', wn=hps.rnn_wn)
-
-        hs = tf.reshape(tf.concat(hs, 1), [-1, hps.nhidden])
-        logits = fc(hs, hps.nvocab, lambda x: x, init, wn=hps.out_wn, scope='out')
-
-    states = tf.stack([cfinal, hfinal], 0)
-    return cells, states, logits
-
-
-def ceil_round_step(n, step):
-    """向上取整到step的倍数"""
-    return int(np.ceil(n/step)*step)
-
-
-def batch_pad(xs, nbatch, nsteps):
-    """批次填充 - 将变长序列填充为固定长度"""
-    xmb = np.zeros((nbatch, nsteps), dtype=np.int32)
-    mmb = np.ones((nbatch, nsteps, 1), dtype=np.float32)
-
-    for i, x in enumerate(xs):
-        length = len(x)
-        npad = nsteps - length
-        xmb[i, -length:] = list(x)
-        mmb[i, :npad] = 0  # 填充位置的掩码设为0
-
-    return xmb, mmb
+        cells = torch.stack(cells, dim=1)               # (N, T, nhidden)
+        return cells, c, h
 
 
 class Model(object):
-    """情感神经元模型 - 封装预训练的mLSTM模型
+    """封装预训练 mLSTM 的特征提取器。
 
-    每个实例使用独立的 tf.Graph 与参数加载器，因此可以安全地多次实例化，
-    不会出现变量作用域冲突或权重串用的问题。
+    每个实例独立持有权重，可安全地多次实例化。
     """
 
-    def __init__(self, nbatch=32, nsteps=32, model_dir='model'):
-        """初始化模型
-
-        Args:
-            nbatch: 批次大小
-            nsteps: 序列长度
-            model_dir: 预训练权重 (0.npy ~ 14.npy) 所在目录
+    def __init__(self, weights_path=DEFAULT_WEIGHTS, device=None, batch_size=128):
         """
-        self.hps = hps = HParams(
-            nhidden=4096,      # LSTM隐藏层维度 - 产生4096维特征
-            nembd=64,          # 词嵌入维度
-            nsteps=nsteps,     # 序列长度
-            nbatch=nbatch,     # 批次大小
-            nstates=2,         # LSTM状态数
-            nvocab=256,        # 词汇表大小
-            out_wn=False,
-            rnn_wn=True,
-        )
+        Args:
+            weights_path: sentiment.safetensors 路径
+            device: 'cuda' / 'cpu'，默认自动选择（有 GPU 用 GPU）
+            batch_size: 前向批大小
+        """
+        if not os.path.exists(weights_path):
+            raise FileNotFoundError(
+                '未找到权重文件：%s\n'
+                '请先运行 `python download_weights.py` 下载，'
+                '或用 `python convert_weights.py` 从原始 .npy 生成。' % weights_path)
 
-        # 加载预训练参数并合并 mLSTM 的四个门权重
-        params = [np.load(os.path.join(model_dir, '%d.npy' % i)) for i in range(15)]
-        params[2] = np.concatenate(params[2:6], axis=1)
-        params[3:6] = []
-        init = make_param_loader(params)
+        self.device = (torch.device(device) if device is not None
+                       else torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+        self.batch_size = batch_size
 
-        # 每个实例独占一张计算图，避免多次实例化时的变量作用域冲突
-        graph = tf.Graph()
-        with graph.as_default():
-            X = tf.placeholder(tf.int32, [None, hps.nsteps])
-            M = tf.placeholder(tf.float32, [None, hps.nsteps, 1])
-            S = tf.placeholder(tf.float32, [hps.nstates, None, hps.nhidden])
+        weights = load_file(weights_path)               # {名称: CPU 张量}
+        self.net = mLSTM(weights).to(self.device).eval()
+        self.nhidden = self.net.nhidden
 
-            cells, states, logits = model(X, S, M, hps, init)
+    def _pad_batch(self, batch, T=None):
+        """把一批字节串后向填充为 (n, T) 的张量，并给出掩码。"""
+        if T is None:
+            T = max(len(s) for s in batch)
+        n = len(batch)
+        X = torch.zeros(n, T, dtype=torch.long)
+        mask = torch.zeros(n, T, 1, dtype=torch.float32)
+        for i, s in enumerate(batch):
+            X[i, :len(s)] = torch.tensor(list(s), dtype=torch.long)
+            mask[i, :len(s), 0] = 1.0
+        return X, mask
 
-            sess = tf.Session()
-            tf.global_variables_initializer().run(session=sess)
+    def transform(self, xs, verbose=False):
+        """把文本列表编码为 [N, 4096] 特征矩阵（最终细胞状态）。"""
+        tstart = time.time()
+        seqs = [preprocess(x) for x in xs]
+        lens = np.asarray([len(s) for s in seqs])
+        order = np.argsort(lens)                        # 按长度排序以减少填充浪费
 
-        def seq_rep(xmb, mmb, smb):
-            """获取序列的最终状态表示"""
-            return sess.run(states, {X: xmb, M: mmb, S: smb})
+        feats = np.zeros((len(seqs), self.nhidden), dtype=np.float32)
+        for start in range(0, len(seqs), self.batch_size):
+            idx = order[start:start + self.batch_size]  # 原始下标
+            X, mask = self._pad_batch([seqs[i] for i in idx])
+            _, c, _ = self.net(X.to(self.device), mask.to(self.device))
+            feats[idx] = c.cpu().numpy()                # 按原始顺序散射回去
 
-        def transform(xs, verbose=False):
-            """主要特征提取函数 - 将文本转换为4096维特征向量"""
-            tstart = time.time()
+        if verbose:
+            print('%0.3f seconds to transform %d examples'
+                  % (time.time() - tstart, len(seqs)))
+        return feats
 
-            xs = [preprocess(x) for x in xs]
+    def cell_transform(self, xs, indexes=None):
+        """返回每个时间步的细胞状态 (N, T, K)，用于细粒度分析（如逐字符可视化）。
 
-            # 按长度排序以提高批次处理效率
-            lens = np.asarray([len(x) for x in xs])
-            sorted_idxs = np.argsort(lens)
-            unsort_idxs = np.argsort(sorted_idxs)
-            sorted_xs = [xs[i] for i in sorted_idxs]
-            maxlen = np.max(lens)
-
-            offset = 0
-            n = len(xs)
-            smb = np.zeros((2, n, hps.nhidden), dtype=np.float32)
-
-            for step in range(0, ceil_round_step(maxlen, nsteps), nsteps):
-                start = step
-                end = step + nsteps
-
-                xsubseq = [x[start:end] for x in sorted_xs]
-
-                # 移除已处理完的空序列
-                ndone = sum([x == b'' for x in xsubseq])
-                offset += ndone
-                xsubseq = xsubseq[ndone:]
-                sorted_xs = sorted_xs[ndone:]
-                nsubseq = len(xsubseq)
-
-                if nsubseq == 0:
-                    continue
-
-                xmb, mmb = batch_pad(xsubseq, nsubseq, nsteps)
-
-                for batch in range(0, nsubseq, nbatch):
-                    start = batch
-                    end = batch + nbatch
-
-                    batch_smb = seq_rep(
-                        xmb[start:end],
-                        mmb[start:end],
-                        smb[:, offset+start:offset+end, :])
-
-                    smb[:, offset+start:offset+end, :] = batch_smb
-
-            # 提取最终特征（LSTM隐藏状态）
-            features = smb[0, unsort_idxs, :]
-
-            if verbose:
-                print('%0.3f seconds to transform %d examples' %
-                      (time.time() - tstart, n))
-
-            return features  # 返回[n, 4096]的特征矩阵
-
-        def cell_transform(xs, indexes=None):
-            """提取所有时间步的细胞状态 - 用于详细分析"""
-            Fs = []
-            xs = [preprocess(x) for x in xs]
-
-            for xmb in tqdm(
-                    iter_data(xs, size=hps.nbatch), ncols=80, leave=False,
-                    total=len(xs)//hps.nbatch):
-
-                smb = np.zeros((2, hps.nbatch, hps.nhidden))
-                n = len(xmb)
-
-                xmb, mmb = batch_pad(xmb, hps.nbatch, hps.nsteps)
-                smb = sess.run(cells, {X: xmb, S: smb, M: mmb})
-                smb = smb[:, :n, :]
-
-                if indexes is not None:
-                    smb = smb[:, :, indexes]
-
-                Fs.append(smb)
-
-            Fs = np.concatenate(Fs, axis=1).transpose(1, 0, 2)
-            return Fs
-
-        self.transform = transform
-        self.cell_transform = cell_transform
+        indexes 不为 None 时只取指定的若干维。
+        """
+        seqs = [preprocess(x) for x in xs]
+        T = max(len(s) for s in seqs)                   # 统一到全局最大长度，便于拼接
+        Fs = []
+        for start in range(0, len(seqs), self.batch_size):
+            batch = seqs[start:start + self.batch_size]
+            X, mask = self._pad_batch(batch, T=T)
+            cells, _, _ = self.net(X.to(self.device), mask.to(self.device))
+            cells = cells.cpu().numpy()
+            if indexes is not None:
+                cells = cells[:, :, indexes]
+            Fs.append(cells)
+        return np.concatenate(Fs, axis=0)
 
 
 if __name__ == '__main__':
-    mdl = Model()
+    model = Model()
 
     texts = [
-        'This movie is amazing and wonderful!',  # 正面文本
-        'This movie is terrible and boring!'     # 负面文本
+        'This movie is amazing and wonderful!',   # 正面
+        'This movie is terrible and boring!',     # 负面
     ]
+    feats = model.transform(texts, verbose=True)
+    print('特征矩阵形状：%s ｜ 设备：%s' % (feats.shape, model.device))
 
-    text_features = mdl.transform(texts, verbose=True)
-
-    # 分析情感神经元（第2388维特征）
-    sentiment_neuron = text_features[:, SENTIMENT_NEURON]
-
-    for i, (text, score) in enumerate(zip(texts, sentiment_neuron)):
-        emotion = "正面" if score > 0 else "负面"
-        print(f"文本{i+1}: {emotion} (激活值: {score:.4f})")
-        print(f"  内容: '{text}'")
+    for i, (text, score) in enumerate(zip(texts, feats[:, SENTIMENT_NEURON])):
+        label = '正面' if score > 0 else '负面'
+        print('文本%d: %s (情感神经元激活值: %+.4f)  内容: %r' % (i + 1, label, score, text))

@@ -1,8 +1,24 @@
 import os
 import html
+import inspect
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
+
+# scikit-learn 1.8 起弃用了 LogisticRegression 的 `penalty` 参数，改用 `l1_ratio`
+# （l1_ratio=1 等价于 L1，l1_ratio=0 等价于 L2）；两种写法配合 solver='liblinear' 数值完全一致。
+# 这里按当前安装的版本自动选择，既消除 deprecation 警告，又无需锁定 sklearn 版本。
+_PENALTY_DEPRECATED = (
+    str(inspect.signature(LogisticRegression).parameters['penalty'].default) == 'deprecated'
+)
+
+
+def _penalty_kwargs(penalty):
+    """把 'l1'/'l2' 翻译成当前 scikit-learn 版本接受的关键字参数。"""
+    if _PENALTY_DEPRECATED:
+        return {'l1_ratio': 1.0 if penalty == 'l1' else 0.0}
+    return {'penalty': penalty}
+
 
 def train_with_reg_cv(trX, trY, vaX, vaY, teX=None, teY=None, penalty='l1',
         C=2**np.arange(-8, 1).astype(float), seed=42):
@@ -25,7 +41,8 @@ def train_with_reg_cv(trX, trY, vaX, vaY, teX=None, teY=None, penalty='l1',
     scores = []
     # 在不同的C值上进行交叉验证
     for i, c in enumerate(C):
-        model = LogisticRegression(C=c, penalty=penalty, solver='liblinear', random_state=seed+i)
+        model = LogisticRegression(C=c, solver='liblinear', random_state=seed+i,
+                                   **_penalty_kwargs(penalty))
         model.fit(trX, trY)
         score = model.score(vaX, vaY)  # 验证集上的准确率
         scores.append(score)
@@ -34,7 +51,8 @@ def train_with_reg_cv(trX, trY, vaX, vaY, teX=None, teY=None, penalty='l1',
     c = C[np.argmax(scores)]
 
     # 用最优参数重新训练模型
-    model = LogisticRegression(C=c, penalty=penalty, solver='liblinear', random_state=seed+len(C))
+    model = LogisticRegression(C=c, solver='liblinear', random_state=seed+len(C),
+                               **_penalty_kwargs(penalty))
     model.fit(trX, trY)
 
     # 计算非零系数数量 (L1正则化会产生稀疏解)
@@ -112,17 +130,3 @@ def iter_data(*data, **kwargs):
             yield data[0][start:end]
         else:
             yield tuple([d[start:end] for d in data])
-
-
-class HParams(object):
-    """
-    超参数容器类 - 用于存储和管理模型超参数
-
-    使用方式:
-        hps = HParams(learning_rate=0.001, batch_size=32)
-        print(hps.learning_rate)  # 0.001
-    """
-
-    def __init__(self, **kwargs):
-        for k, v in kwargs.items():
-            setattr(self, k, v)

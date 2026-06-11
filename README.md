@@ -1,6 +1,6 @@
 # 生成评论与发现情感 (Generating Reviews and Discovering Sentiment)
 
-> **本项目在保留核心功能的前提下，已部分重写以适配新版本依赖（TensorFlow 2.x）。**
+> **本项目已从原始 TensorFlow 实现重写为 PyTorch（仅推理 / 特征提取），权重沿用上游预训练参数。**
 
 本仓库复现论文 [《Learning to Generate Reviews and Discovering Sentiment》](https://arxiv.org/abs/1704.01444)（Alec Radford、Rafal Jozefowicz、Ilya Sutskever）的代码。
 
@@ -12,12 +12,12 @@
 
 | 依赖 | 版本 |
 | --- | --- |
-| TensorFlow | 2.9.0 |
-| Python | 3.8 (Ubuntu 20.04) |
-| CUDA | 11.2 |
-| GPU | RTX 3090 × 1 |
+| PyTorch | ≥ 2.0 |
+| Python | ≥ 3.8 |
+| GPU | 可选（实验环境为 AutoDL：RTX 3090 / CUDA 11.2） |
 
-> 说明：模型基于 TensorFlow 1.x 的静态图编写，`encoder.py` 顶部通过 `tf.compat.v1` 兼容层（`disable_v2_behavior()`）在 TF 2.x 上运行原始计算图。
+> 说明：模型为纯推理实现，`Model` 会自动选择 GPU（不可用时回退到 CPU）。
+> 改用 PyTorch 后不再受上游 TensorFlow 对 Python 版本的 3.10 上限限制，可在 3.11 / 3.12 上运行。
 
 ## 快速开始
 
@@ -29,14 +29,16 @@ pip install -r requirements.txt
 
 **2. 下载预训练权重**
 
-权重（约 330 MB）不随仓库分发，需外部下载到 `model/` 目录：
+权重为单个文件 `sentiment.safetensors`（约 330 MB），不随仓库分发，需下载到 `model/` 目录：
 
 ```bash
 python download_weights.py
 ```
 
-> 首次使用前，请在 `download_weights.py` 中填好 `BASE_URL`（权重的托管根地址），
-> 或通过环境变量指定：`export SENTIMENT_WEIGHTS_URL=<下载根地址>`。
+> 首次使用前，请在 `download_weights.py` 中填好 `WEIGHTS_URL`（`sentiment.safetensors` 的完整下载地址），
+> 或通过环境变量指定：`export SENTIMENT_WEIGHTS_URL=<完整地址>`。
+>
+> 若你手头有上游原始的 15 个 `.npy`，可用 `python convert_weights.py` 一次性合并生成 `sentiment.safetensors`。
 
 **3. 提取特征**
 
@@ -50,7 +52,7 @@ text = ['demo!']
 text_features = model.transform(text)
 ```
 
-`transform` 返回形状为 `[样本数, 4096]` 的特征矩阵，即 mLSTM 的最终隐藏状态。
+`transform` 返回形状为 `[样本数, 4096]` 的特征矩阵，即 mLSTM 的最终细胞状态（cell state）。模型若检测到可用 GPU 会自动启用。
 
 ## 情感分类示例
 
@@ -68,13 +70,14 @@ python sst_binary_demo.py
 
 ```
 .
-├── encoder.py           # mLSTM 模型与特征提取（Model 类）
+├── encoder.py           # mLSTM 模型与特征提取（PyTorch，Model 类）
 ├── utils.py             # 数据加载、预处理、逻辑回归训练等工具函数
 ├── sst_binary_demo.py   # SST 二分类示例 + 情感神经元可视化
-├── download_weights.py  # 从外部托管地址下载预训练权重
+├── download_weights.py  # 下载预训练权重（单个 safetensors）
+├── convert_weights.py   # 把上游 15 个 .npy 合并为 sentiment.safetensors（一次性）
 ├── requirements.txt     # Python 依赖
 ├── tests/               # 冒烟测试
-├── model/               # 预训练权重（0.npy ~ 14.npy，需下载，不纳入版本控制）
+├── model/               # 预训练权重 sentiment.safetensors（需下载，不纳入版本控制）
 └── data/                # SST 二分类数据集（train/dev/test_binary_sent.csv）
 ```
 

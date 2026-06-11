@@ -32,4 +32,10 @@ sentiment_unit = trXt[:, SENTIMENT_NEURON]
 plt.hist(sentiment_unit[trY==0], bins=25, alpha=0.5, label='neg')
 plt.hist(sentiment_unit[trY==1], bins=25, alpha=0.5, label='pos')
 plt.legend()
+plt.title('Sentiment neuron (unit %d) activation' % SENTIMENT_NEURON)
+plt.xlabel('activation')
+
+# 先保存图像（AutoDL 等无显示环境下 plt.show() 不可用，savefig 始终有效）
+plt.savefig('sentiment_neuron.png', dpi=120, bbox_inches='tight')
+print('情感神经元激活分布图已保存到 sentiment_neuron.png')
 plt.show()

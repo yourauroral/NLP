@@ -21,4 +21,8 @@ env/
 
 # Pretrained weights (downloaded via download_weights.py, not versioned)
 model/*.npy
+model/*.safetensors
+
+# Generated artifacts
+sentiment_neuron.png
 
