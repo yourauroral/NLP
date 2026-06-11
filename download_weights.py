@@ -22,11 +22,10 @@ import sys
 import urllib.error
 import urllib.request
 
-# ─────────────────────────────────────────────────────────────────────────
-# TODO: 权重上传到 HuggingFace 后，把 sentiment.safetensors 的完整下载地址填到这里。
-#       形如： "https://huggingface.co/<用户>/<仓库>/resolve/main/sentiment.safetensors"
-#       留空时可用环境变量 SENTIMENT_WEIGHTS_URL 覆盖。
-WEIGHTS_URL = ""
+# sentiment.safetensors 的完整下载地址（HuggingFace 直链）。
+# 注意用 resolve（直接返回文件）而非 blob（网页视图）。
+# 可用环境变量 SENTIMENT_WEIGHTS_URL 覆盖（无需改本文件）。
+WEIGHTS_URL = "https://huggingface.co/TianmoCheng/sentiment-model/resolve/main/sentiment.safetensors"
 # ─────────────────────────────────────────────────────────────────────────
 
 DEFAULT_DEST = os.path.join('model', 'sentiment.safetensors')
