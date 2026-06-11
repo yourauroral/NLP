@@ -27,18 +27,21 @@
 pip install -r requirements.txt
 ```
 
-**2. 下载预训练权重**
+**2. 准备预训练权重**
 
-权重为单个文件 `sentiment.safetensors`（约 330 MB），不随仓库分发，需下载到 `model/` 目录：
+权重为单个文件 `sentiment.safetensors`（约 330 MB），不随仓库分发。运行：
 
 ```bash
 python download_weights.py
 ```
 
-> 首次使用前，请在 `download_weights.py` 中填好 `WEIGHTS_URL`（`sentiment.safetensors` 的完整下载地址），
-> 或通过环境变量指定：`export SENTIMENT_WEIGHTS_URL=<完整地址>`。
->
-> 若你手头有上游原始的 15 个 `.npy`，可用 `python convert_weights.py` 一次性合并生成 `sentiment.safetensors`。
+该脚本**优先使用本地权重，必要时才下载**，顺序为：
+
+1. `model/sentiment.safetensors` 已存在 → 直接使用；
+2. 同目录下有原始 `0.npy ~ 14.npy` → 就地转换，无需下载；
+3. 以上都没有 → 才从配置的地址下载。此时需在 `download_weights.py` 填好 `WEIGHTS_URL`（`sentiment.safetensors` 的完整地址），或设置环境变量 `export SENTIMENT_WEIGHTS_URL=<完整地址>`。
+
+> `Model()` 同样只用本地权重：找不到 `sentiment.safetensors` 时会自动回退到同目录下的 `.npy`，全程不强制联网。
 
 **3. 提取特征**
 

@@ -110,23 +110,37 @@ class Model(object):
     def __init__(self, weights_path=DEFAULT_WEIGHTS, device=None, batch_size=128):
         """
         Args:
-            weights_path: sentiment.safetensors 路径
+            weights_path: sentiment.safetensors 路径；若该文件不存在，则自动回退到
+                          同目录下的原始 0.npy~14.npy 就地组装（因此不强制下载）。
             device: 'cuda' / 'cpu'，默认自动选择（有 GPU 用 GPU）
             batch_size: 前向批大小
         """
-        if not os.path.exists(weights_path):
-            raise FileNotFoundError(
-                '未找到权重文件：%s\n'
-                '请先运行 `python download_weights.py` 下载，'
-                '或用 `python convert_weights.py` 从原始 .npy 生成。' % weights_path)
-
         self.device = (torch.device(device) if device is not None
                        else torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
         self.batch_size = batch_size
 
-        weights = load_file(weights_path)               # {名称: CPU 张量}
+        weights = self._load_weights(weights_path)
         self.net = mLSTM(weights).to(self.device).eval()
         self.nhidden = self.net.nhidden
+
+    @staticmethod
+    def _load_weights(weights_path):
+        """加载权重字典：优先读 safetensors；没有则用同目录下的原始 .npy 就地组装。
+
+        这样只要本地有任一形式的权重即可使用，不强制下载或预先转换。
+        """
+        if os.path.exists(weights_path):
+            return load_file(weights_path)              # {名称: CPU 张量}
+        # 没有 safetensors 时，回退到本地原始 .npy（无需下载 / 预转换）
+        from convert_weights import assemble, has_shards
+        model_dir = os.path.dirname(weights_path) or '.'
+        if has_shards(model_dir):
+            print('• 未找到 %s，改用本地原始 .npy 就地组装…' % weights_path)
+            return assemble(model_dir)
+        raise FileNotFoundError(
+            '未找到权重：%s（同目录下也没有原始 0.npy~14.npy）。\n'
+            '请运行 `python download_weights.py`（会优先用本地权重，必要时才下载），'
+            '或把权重放到该目录。' % weights_path)
 
     def _pad_batch(self, batch, T=None):
         """把一批字节串后向填充为 (n, T) 的张量，并给出掩码。"""

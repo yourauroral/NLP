@@ -36,13 +36,23 @@ EXPECTED_SHAPES = {
 }
 
 
+def has_shards(src_dir):
+    """src_dir 下是否完整存在 0.npy ~ 14.npy 这 15 个原始分片。"""
+    return all(os.path.exists(os.path.join(src_dir, '%d.npy' % i))
+               for i in range(NUM_SHARDS))
+
+
 def assemble(src_dir):
-    """读取 0.npy ~ 14.npy，组装为 {名称: torch.Tensor} 字典并校验形状。"""
+    """读取 0.npy ~ 14.npy，组装为 {名称: torch.Tensor} 字典并校验形状。
+
+    缺少分片抛 FileNotFoundError，形状不符抛 ValueError —— 便于被其他模块复用。
+    """
     missing = [i for i in range(NUM_SHARDS)
                if not os.path.exists(os.path.join(src_dir, '%d.npy' % i))]
     if missing:
-        sys.exit('✗ 缺少原始权重分片：%s（在 %s/ 下未找到）'
-                 % (', '.join('%d.npy' % i for i in missing), src_dir))
+        raise FileNotFoundError(
+            '缺少原始权重分片：%s（在 %s/ 下未找到）'
+            % (', '.join('%d.npy' % i for i in missing), src_dir))
 
     p = [np.load(os.path.join(src_dir, '%d.npy' % i)) for i in range(NUM_SHARDS)]
 
@@ -62,28 +72,34 @@ def assemble(src_dir):
     for k, arr in raw.items():
         arr = np.ascontiguousarray(arr, dtype=np.float32)
         if arr.shape != EXPECTED_SHAPES[k]:
-            sys.exit('✗ %s 形状为 %s，预期 %s' % (k, arr.shape, EXPECTED_SHAPES[k]))
+            raise ValueError('%s 形状为 %s，预期 %s' % (k, arr.shape, EXPECTED_SHAPES[k]))
         tensors[k] = torch.from_numpy(arr)
     return tensors
+
+
+def convert(src_dir, out_file):
+    """从 src_dir 的 15 个 .npy 组装并写出单个 safetensors，返回输出路径。"""
+    tensors = assemble(src_dir)
+    os.makedirs(os.path.dirname(out_file) or '.', exist_ok=True)
+    save_file(tensors, out_file, metadata={
+        'model': 'sentiment-neuron mLSTM (4096-unit, byte-level)',
+        'sentiment_neuron': '2388',
+    })
+    n_params = sum(t.numel() for t in tensors.values())
+    size_mb = os.path.getsize(out_file) / 1024 / 1024
+    print('✓ 已写出 %s （张量 %d 个 · 参数 %d · %.1f MB）'
+          % (out_file, len(tensors), n_params, size_mb))
+    return out_file
 
 
 def main():
     src_dir = sys.argv[1] if len(sys.argv) > 1 else 'model'
     out_file = (sys.argv[2] if len(sys.argv) > 2
                 else os.path.join('model', 'sentiment.safetensors'))
-
-    tensors = assemble(src_dir)
-
-    os.makedirs(os.path.dirname(out_file) or '.', exist_ok=True)
-    save_file(tensors, out_file, metadata={
-        'model': 'sentiment-neuron mLSTM (4096-unit, byte-level)',
-        'sentiment_neuron': '2388',
-    })
-
-    n_params = sum(t.numel() for t in tensors.values())
-    size_mb = os.path.getsize(out_file) / 1024 / 1024
-    print('✓ 已写出 %s' % out_file)
-    print('  张量 %d 个 · 参数 %d · 体积 %.1f MB' % (len(tensors), n_params, size_mb))
+    try:
+        convert(src_dir, out_file)
+    except (FileNotFoundError, ValueError) as e:
+        sys.exit('✗ %s' % e)
 
 
 if __name__ == '__main__':
